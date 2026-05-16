@@ -30,7 +30,6 @@ import me.mrCookieSlime.Slimefun.api.inventory.BlockMenu;
 import org.bukkit.Location;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
-import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
 public class MEPatternManagementTerminal extends METerminal {
@@ -136,9 +135,8 @@ public class MEPatternManagementTerminal extends METerminal {
         }
 
         // 渲染签名: 列表内容版本 + filter + page. 任一变化才重绘 48 槽.
-        long renderSig = (((long) cache.signature) * 1315423911L)
-                ^ (long) filter.hashCode() * 2654435761L
-                ^ ((long) page << 32);
+        long renderSig =
+                (((long) cache.signature) * 1315423911L) ^ (long) filter.hashCode() * 2654435761L ^ ((long) page << 32);
         if (cache.lastDrawnSignature == renderSig) {
             return;
         }
@@ -260,8 +258,7 @@ public class MEPatternManagementTerminal extends METerminal {
         return loc.getBlockX() + ", " + loc.getBlockY() + ", " + loc.getBlockZ();
     }
 
-    private ChestMenu.MenuClickHandler handlePatternClick(
-            PatternEntry entry, NetworkInfo info, Location terminalLoc) {
+    private ChestMenu.MenuClickHandler handlePatternClick(PatternEntry entry, NetworkInfo info, Location terminalLoc) {
         return (player, slot, itemStack, action) -> {
             SlimefunBlockData blockData =
                     Slimefun.getDatabaseManager().getBlockDataController().getBlockData(entry.holderLocation);

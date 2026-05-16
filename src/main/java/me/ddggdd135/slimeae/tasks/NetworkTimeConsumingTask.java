@@ -40,8 +40,7 @@ public class NetworkTimeConsumingTask implements Runnable {
     public void start(@Nonnull SlimeAEPlugin plugin) {
         this.tickRate = Slimefun.getCfg().getInt("URID.custom-ticker-delay");
 
-        int configured =
-                plugin.getConfig().getInt("network-time-consuming.threads", 0);
+        int configured = plugin.getConfig().getInt("network-time-consuming.threads", 0);
         if (configured <= 0) {
             configured = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
         }
@@ -131,7 +130,8 @@ public class NetworkTimeConsumingTask implements Runnable {
             // 网络内部串行: NetworkInfo.storageLock 已经保证存储原子性,
             // 但 ChainedBus 之间的 inventory 写入也不应并发踩同一目标容器, 故此处不再二级并行.
             for (org.bukkit.Location loc : networkInfo.getChildren()) {
-                IMEObject slimefunItem = SlimeAEPlugin.getNetworkData().AllNetworkBlocks.get(loc);
+                IMEObject slimefunItem =
+                        SlimeAEPlugin.getNetworkData().AllNetworkBlocks.get(loc);
                 if (slimefunItem == null) continue;
                 try {
                     slimefunItem.onNetworkTimeConsumingTick(loc.getBlock(), networkInfo);
@@ -142,9 +142,7 @@ public class NetworkTimeConsumingTask implements Runnable {
                 }
             }
         } catch (Exception | LinkageError netEx) {
-            SlimeAEPlugin.getInstance()
-                    .getLogger()
-                    .log(Level.SEVERE, netEx, () -> "Exception while ticking network");
+            SlimeAEPlugin.getInstance().getLogger().log(Level.SEVERE, netEx, () -> "Exception while ticking network");
         }
     }
 
