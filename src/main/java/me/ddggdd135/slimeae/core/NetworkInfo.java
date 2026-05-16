@@ -5,6 +5,7 @@ import java.util.*;
 import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import me.ddggdd135.guguslimefunlib.api.AEMenu;
@@ -38,6 +39,7 @@ public class NetworkInfo implements IDisposable {
     private final Map<CraftType, Integer> virtualCraftingDeviceUsed = new ConcurrentHashMap<>();
     private volatile StorageCollection storage = new StorageCollection();
     private volatile IStorage storageNoNetworks = new StorageCollection();
+    private final ReentrantLock storageLock = new ReentrantLock();
     private final ConcurrentHashSet<AutoCraftingTask> autoCraftingTasks = new ConcurrentHashSet<>();
     private final AEMenu autoCraftingMenu = new AEMenu("&e自动合成任务");
     private final ItemStorage tempStorage = new ItemStorage();
@@ -165,6 +167,16 @@ public class NetworkInfo implements IDisposable {
 
     public void setStorageNoNetworks(@Nonnull IStorage storage) {
         this.storageNoNetworks = storage;
+    }
+
+    /**
+     * 网络级存储互斥锁。
+     * <p>所有"读快照→takeItem→pushItem 回退"的临界区都必须持此锁，
+     * 否则在多线程并发驱动总线时会发生超额取出导致刷物。</p>
+     */
+    @Nonnull
+    public ReentrantLock getStorageLock() {
+        return storageLock;
     }
 
     @Override

@@ -4,10 +4,12 @@ import com.xzavier0722.mc.plugin.slimefun4.storage.controller.SlimefunBlockData;
 import com.xzavier0722.mc.plugin.slimefun4.storage.util.StorageCacheUtils;
 import io.github.thebusybiscuit.slimefun4.api.items.SlimefunItem;
 import io.github.thebusybiscuit.slimefun4.libraries.paperlib.PaperLib;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.annotation.Nonnull;
 import me.ddggdd135.slimeae.api.abstracts.BusTickContext;
 import me.ddggdd135.slimeae.api.interfaces.IMEObject;
 import me.ddggdd135.slimeae.api.interfaces.IStorage;
+import me.ddggdd135.slimeae.core.NetworkInfo;
 import me.mrCookieSlime.Slimefun.api.inventory.BlockMenu;
 import me.mrCookieSlime.Slimefun.api.item_transport.ItemTransportFlow;
 import org.bukkit.World;
@@ -51,11 +53,31 @@ public final class ImportOperation {
 
         BlockMenu inv = StorageCacheUtils.getMenu(target.getLocation());
         if (inv != null) {
-            executeFromBlockMenu(context, inv, advanced);
+            ReentrantLock lock = lockFor(context);
+            lock.lock();
+            try {
+                executeFromBlockMenu(context, inv, advanced);
+            } finally {
+                lock.unlock();
+            }
         } else if (allowVanilla && PaperLib.getBlockState(target, false).getState() instanceof Container container) {
-            executeFromVanillaContainer(context, container, advanced);
+            ReentrantLock lock = lockFor(context);
+            lock.lock();
+            try {
+                executeFromVanillaContainer(context, container, advanced);
+            } finally {
+                lock.unlock();
+            }
         }
     }
+
+    @Nonnull
+    private static ReentrantLock lockFor(@Nonnull BusTickContext context) {
+        NetworkInfo info = context.getNetworkInfo();
+        return info != null ? info.getStorageLock() : FALLBACK_LOCK;
+    }
+
+    private static final ReentrantLock FALLBACK_LOCK = new ReentrantLock();
 
     private static void executeFromBlockMenu(
             @Nonnull BusTickContext context, @Nonnull BlockMenu inv, boolean advanced) {
@@ -231,9 +253,16 @@ public final class ImportOperation {
         int bz = origin.getZ() + dz;
         int chainDist = context.getChainDistance();
 
-        for (int i = 0; i < chainDist; i++) {
-            Block target = world.getBlockAt(bx + dx * i, by + dy * i, bz + dz * i);
-            execute(context, target, checkNetwork, allowVanilla, true);
+        // 在链式扫描期间整段持有网络锁: ReentrantLock 同线程重入仍便宜, 但一次性持有避免每个 target 都做 CAS
+        ReentrantLock lock = lockFor(context);
+        lock.lock();
+        try {
+            for (int i = 0; i < chainDist; i++) {
+                Block target = world.getBlockAt(bx + dx * i, by + dy * i, bz + dz * i);
+                execute(context, target, checkNetwork, allowVanilla, true);
+            }
+        } finally {
+            lock.unlock();
         }
     }
 }

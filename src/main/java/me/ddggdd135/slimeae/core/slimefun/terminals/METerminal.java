@@ -78,6 +78,13 @@ public class METerminal extends TickingBlock implements IMEObject, InventoryBloc
     // === F8: 每个槽位的上一次显示状态缓存 ===
     private static final Map<Location, DisplaySlotCache> displaySlotCacheMap = new ConcurrentHashMap<>();
 
+    // === F9: GUI 重绘节流 ===
+    // tick() 每秒 20 次调 updateGui, 但实际重绘对玩家肉眼来说每 200ms 一次足够顺畅.
+    // 这里把 tick 路径上的 updateGui 节流到 5Hz, 把网络的 ItemKey 构造 / merge / sort 等成本砍掉 75%.
+    // 玩家交互 (点击取物 / 改过滤器 / 翻页) 会显式调 clearSortedItemsCache 让下一 tick 立即重绘.
+    private static final Map<Location, Long> lastTickRedrawAt = new ConcurrentHashMap<>();
+    private static final long TICK_REDRAW_INTERVAL_MS = 200L;
+
     private static final Map<ItemStack, String> sortKeyCache = new ConcurrentHashMap<>();
     private static final int SORT_KEY_CACHE_MAX = 20000;
 
@@ -126,11 +133,25 @@ public class METerminal extends TickingBlock implements IMEObject, InventoryBloc
     protected void tick(@Nonnull Block block, @Nonnull SlimefunItem item, @Nonnull SlimefunBlockData data) {
         BlockMenu blockMenu = StorageCacheUtils.getMenu(block.getLocation());
         if (blockMenu == null) return;
-        if (blockMenu.hasViewer()) updateGui(block);
+        if (blockMenu.hasViewer() && shouldTickRedraw(block.getLocation())) updateGui(block);
         NetworkInfo info = SlimeAEPlugin.getNetworkData().getNetworkInfo(block.getLocation());
         if (info == null) return;
         ItemStack itemStack = blockMenu.getItemInSlot(getInputSlot());
         if (itemStack != null && !itemStack.getType().isAir()) info.getStorage().pushItem(itemStack);
+    }
+
+    /**
+     * 节流 tick 路径上的 GUI 重绘. 玩家交互通过 {@link #clearSortedItemsCache(Location)}
+     * 已经会重置时间戳, 所以人感知的延迟只限于"没有玩家操作但物品被网络变更"时, 最多 {@value #TICK_REDRAW_INTERVAL_MS} ms.
+     */
+    private static boolean shouldTickRedraw(@Nonnull Location loc) {
+        long now = System.currentTimeMillis();
+        Long last = lastTickRedrawAt.get(loc);
+        if (last != null && now - last < TICK_REDRAW_INTERVAL_MS) {
+            return false;
+        }
+        lastTickRedrawAt.put(loc, now);
+        return true;
     }
 
     public METerminal(ItemGroup itemGroup, SlimefunItemStack item, RecipeType recipeType, ItemStack[] recipe) {
@@ -650,6 +671,8 @@ public class METerminal extends TickingBlock implements IMEObject, InventoryBloc
         sortedItemsCacheMap.remove(loc);
         displaySlotCacheMap.remove(loc);
         lastFilterDisplayMap.remove(loc);
+        // 清掉重绘节流时间戳, 让下一次 tick 立即重绘 (响应玩家交互).
+        lastTickRedrawAt.remove(loc);
     }
 
     /**
@@ -659,6 +682,7 @@ public class METerminal extends TickingBlock implements IMEObject, InventoryBloc
         sortedItemsCacheMap.clear();
         displaySlotCacheMap.clear();
         lastFilterDisplayMap.clear();
+        lastTickRedrawAt.clear();
         if (sortKeyCache.size() > SORT_KEY_CACHE_MAX) sortKeyCache.clear();
     }
 

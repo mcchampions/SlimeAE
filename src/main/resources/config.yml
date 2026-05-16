@@ -31,7 +31,16 @@ auto-crafting:
 
 # 链式总线相关设置
 chained-bus:
+  # true:  ChainedBus 在 NetworkTimeConsumingTask 的工作线程池上 tick (推荐, 与多线程化配套)
+  # false: ChainedBus 在 BlockTicker.tick() 同步路径上 tick, 可被 SlimefunAccelerator 按 chunk 派发到区域线程
   async: true
+
+# 多线程网络 tick 设置
+network-time-consuming:
+  # NetworkTimeConsumingTask 内部工作线程池大小. 0 = 自动 (max(2, CPU 核数/2))
+  # 每个 NetworkInfo 一次只占一个线程 (网络内串行, 多网络并行).
+  # 单服只有 1~2 个网络时调大没意义, 多分服 / 多控制器场景调到核数附近.
+  threads: 0
 
 # 网络交换机设置
 networks-expansion-switch:

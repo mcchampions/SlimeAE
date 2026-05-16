@@ -5,6 +5,7 @@ import com.xzavier0722.mc.plugin.slimefun4.storage.util.StorageCacheUtils;
 import io.github.thebusybiscuit.slimefun4.libraries.dough.collections.Pair;
 import io.github.thebusybiscuit.slimefun4.libraries.paperlib.PaperLib;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import me.ddggdd135.guguslimefunlib.api.ItemHashMap;
@@ -15,6 +16,7 @@ import me.ddggdd135.slimeae.api.interfaces.IStorage;
 import me.ddggdd135.slimeae.api.items.ItemInfo;
 import me.ddggdd135.slimeae.api.items.ItemRequest;
 import me.ddggdd135.slimeae.api.items.ItemStorage;
+import me.ddggdd135.slimeae.core.NetworkInfo;
 import me.mrCookieSlime.Slimefun.api.inventory.BlockMenu;
 import me.mrCookieSlime.Slimefun.api.item_transport.ItemTransportFlow;
 import org.bukkit.World;
@@ -90,7 +92,6 @@ public final class ExportOperation {
         if (settings == null) return;
 
         int tickMultiplier = context.getTickMultiplier();
-        ItemHashMap<Long> storageSnapshot = networkStorage.getStorageUnsafe();
 
         int slotCount = settingHolder.getSettingSlots().length;
         int uniqueCount = 0;
@@ -121,48 +122,57 @@ public final class ExportOperation {
         }
         if (uniqueCount == 0) return;
 
-        int reqCount = 0;
-        int[] reqIndices = new int[uniqueCount];
-        ItemRequest[] batchReqs = new ItemRequest[uniqueCount];
+        // 预解析每个 unique key 在目标 inv 的可写入槽（与网络存储无关，可在锁外完成）
         int[][] slotArrays = new int[uniqueCount][];
-
         for (int i = 0; i < uniqueCount; i++) {
-            Long available = storageSnapshot.getKey(uniqueKeys[i]);
-            if (available == null || available <= 0) continue;
-            int[] inputSlots;
             try {
-                inputSlots = targetInv
+                slotArrays[i] = targetInv
                         .getPreset()
                         .getSlotsAccessedByItemTransport(
                                 targetInv, ItemTransportFlow.INSERT, uniqueKeys[i].getItemStack());
             } catch (IllegalArgumentException e) {
-                continue;
+                slotArrays[i] = null;
             }
-            if (inputSlots == null || inputSlots.length == 0) continue;
-
-            long actualAmount = Math.min(mergedAmounts[i], available);
-            if (actualAmount <= 0) continue;
-            slotArrays[i] = inputSlots;
-            reqIndices[reqCount] = i;
-            batchReqs[reqCount] = new ItemRequest(uniqueKeys[i], actualAmount);
-            reqCount++;
         }
-        if (reqCount == 0) return;
 
-        ItemRequest[] finalReqs =
-                reqCount == batchReqs.length ? batchReqs : java.util.Arrays.copyOf(batchReqs, reqCount);
-        ItemStorage taken = networkStorage.takeItem(finalReqs);
-        ItemHashMap<Long> takenMap = taken.getStorageUnsafe();
+        ReentrantLock lock = lockFor(context);
+        lock.lock();
+        try {
+            ItemHashMap<Long> storageSnapshot = networkStorage.getStorageUnsafe();
 
-        for (int r = 0; r < reqCount; r++) {
-            int idx = reqIndices[r];
-            Long takenAmount = takenMap.getKey(uniqueKeys[idx]);
-            if (takenAmount == null || takenAmount <= 0) continue;
-            long remainder = pushToSlotsDirect(
-                    targetInv, uniqueKeys[idx], uniqueKeys[idx].getItemStack(), takenAmount, slotArrays[idx]);
-            if (remainder > 0) {
-                networkStorage.pushItem(new ItemInfo(uniqueKeys[idx], remainder));
+            int reqCount = 0;
+            int[] reqIndices = new int[uniqueCount];
+            ItemRequest[] batchReqs = new ItemRequest[uniqueCount];
+
+            for (int i = 0; i < uniqueCount; i++) {
+                if (slotArrays[i] == null || slotArrays[i].length == 0) continue;
+                Long available = storageSnapshot.getKey(uniqueKeys[i]);
+                if (available == null || available <= 0) continue;
+                long actualAmount = Math.min(mergedAmounts[i], available);
+                if (actualAmount <= 0) continue;
+                reqIndices[reqCount] = i;
+                batchReqs[reqCount] = new ItemRequest(uniqueKeys[i], actualAmount);
+                reqCount++;
             }
+            if (reqCount == 0) return;
+
+            ItemRequest[] finalReqs =
+                    reqCount == batchReqs.length ? batchReqs : java.util.Arrays.copyOf(batchReqs, reqCount);
+            ItemStorage taken = networkStorage.takeItem(finalReqs);
+            ItemHashMap<Long> takenMap = taken.getStorageUnsafe();
+
+            for (int r = 0; r < reqCount; r++) {
+                int idx = reqIndices[r];
+                Long takenAmount = takenMap.getKey(uniqueKeys[idx]);
+                if (takenAmount == null || takenAmount <= 0) continue;
+                long remainder = pushToSlotsDirect(
+                        targetInv, uniqueKeys[idx], uniqueKeys[idx].getItemStack(), takenAmount, slotArrays[idx]);
+                if (remainder > 0) {
+                    networkStorage.pushItem(new ItemInfo(uniqueKeys[idx], remainder));
+                }
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -184,7 +194,6 @@ public final class ExportOperation {
         for (int s = 0; s < invSize; s++) inputSlots[s] = s;
 
         int tickMultiplier = context.getTickMultiplier();
-        ItemHashMap<Long> storageSnapshot = networkStorage.getStorageUnsafe();
 
         int slotCount = settingHolder.getSettingSlots().length;
         int uniqueCount = 0;
@@ -215,35 +224,43 @@ public final class ExportOperation {
         }
         if (uniqueCount == 0) return;
 
-        int reqCount = 0;
-        int[] reqIndices = new int[uniqueCount];
-        ItemRequest[] batchReqs = new ItemRequest[uniqueCount];
+        ReentrantLock lock = lockFor(context);
+        lock.lock();
+        try {
+            ItemHashMap<Long> storageSnapshot = networkStorage.getStorageUnsafe();
 
-        for (int i = 0; i < uniqueCount; i++) {
-            Long available = storageSnapshot.getKey(uniqueKeys[i]);
-            if (available == null || available <= 0) continue;
-            long actualAmount = Math.min(mergedAmounts[i], available);
-            if (actualAmount <= 0) continue;
-            reqIndices[reqCount] = i;
-            batchReqs[reqCount] = new ItemRequest(uniqueKeys[i], actualAmount);
-            reqCount++;
-        }
-        if (reqCount == 0) return;
+            int reqCount = 0;
+            int[] reqIndices = new int[uniqueCount];
+            ItemRequest[] batchReqs = new ItemRequest[uniqueCount];
 
-        ItemRequest[] finalReqs =
-                reqCount == batchReqs.length ? batchReqs : java.util.Arrays.copyOf(batchReqs, reqCount);
-        ItemStorage taken = networkStorage.takeItem(finalReqs);
-        ItemHashMap<Long> takenMap = taken.getStorageUnsafe();
-
-        for (int r = 0; r < reqCount; r++) {
-            int idx = reqIndices[r];
-            Long takenAmount = takenMap.getKey(uniqueKeys[idx]);
-            if (takenAmount == null || takenAmount <= 0) continue;
-            long remainder = pushToInventoryDirect(
-                    inventory, uniqueKeys[idx], uniqueKeys[idx].getItemStack(), takenAmount, inputSlots);
-            if (remainder > 0) {
-                networkStorage.pushItem(new ItemInfo(uniqueKeys[idx], remainder));
+            for (int i = 0; i < uniqueCount; i++) {
+                Long available = storageSnapshot.getKey(uniqueKeys[i]);
+                if (available == null || available <= 0) continue;
+                long actualAmount = Math.min(mergedAmounts[i], available);
+                if (actualAmount <= 0) continue;
+                reqIndices[reqCount] = i;
+                batchReqs[reqCount] = new ItemRequest(uniqueKeys[i], actualAmount);
+                reqCount++;
             }
+            if (reqCount == 0) return;
+
+            ItemRequest[] finalReqs =
+                    reqCount == batchReqs.length ? batchReqs : java.util.Arrays.copyOf(batchReqs, reqCount);
+            ItemStorage taken = networkStorage.takeItem(finalReqs);
+            ItemHashMap<Long> takenMap = taken.getStorageUnsafe();
+
+            for (int r = 0; r < reqCount; r++) {
+                int idx = reqIndices[r];
+                Long takenAmount = takenMap.getKey(uniqueKeys[idx]);
+                if (takenAmount == null || takenAmount <= 0) continue;
+                long remainder = pushToInventoryDirect(
+                        inventory, uniqueKeys[idx], uniqueKeys[idx].getItemStack(), takenAmount, inputSlots);
+                if (remainder > 0) {
+                    networkStorage.pushItem(new ItemInfo(uniqueKeys[idx], remainder));
+                }
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -370,58 +387,78 @@ public final class ExportOperation {
         }
         if (validCount == 0) return;
 
-        ItemHashMap<Long> storageSnapshot = networkStorage.getStorageUnsafe();
         long[] totalDemand = new long[uniqueCount];
         for (int j = 0; j < uniqueCount; j++) {
             totalDemand[j] = baseAmounts[j] * validCount;
         }
 
-        int reqCount = 0;
-        int[] reqIndices = new int[uniqueCount];
-        ItemRequest[] batchReqs = new ItemRequest[uniqueCount];
+        ReentrantLock lock = lockFor(context);
+        lock.lock();
+        try {
+            ItemHashMap<Long> storageSnapshot = networkStorage.getStorageUnsafe();
 
-        for (int j = 0; j < uniqueCount; j++) {
-            Long available = storageSnapshot.getKey(uniqueKeys[j]);
-            if (available == null || available <= 0) continue;
-            long actualAmount = Math.min(totalDemand[j], available);
-            if (actualAmount <= 0) continue;
-            reqIndices[reqCount] = j;
-            batchReqs[reqCount] = new ItemRequest(uniqueKeys[j], actualAmount);
-            reqCount++;
-        }
-        if (reqCount == 0) return;
+            int reqCount = 0;
+            int[] reqIndices = new int[uniqueCount];
+            ItemRequest[] batchReqs = new ItemRequest[uniqueCount];
 
-        ItemRequest[] finalReqs =
-                reqCount == batchReqs.length ? batchReqs : java.util.Arrays.copyOf(batchReqs, reqCount);
-        ItemStorage taken = networkStorage.takeItem(finalReqs);
-        ItemHashMap<Long> takenMap = taken.getStorageUnsafe();
-
-        long[] remaining = new long[uniqueCount];
-        for (int r = 0; r < reqCount; r++) {
-            int idx = reqIndices[r];
-            Long takenAmount = takenMap.getKey(uniqueKeys[idx]);
-            if (takenAmount != null && takenAmount > 0) remaining[idx] = takenAmount;
-        }
-
-        for (int t = 0; t < validCount; t++) {
-            BlockMenu targetInv = validMenus[t];
             for (int j = 0; j < uniqueCount; j++) {
-                if (remaining[j] <= 0) continue;
-                int[] inputSlots = validSlotArrays[t][j];
-                if (inputSlots == null || inputSlots.length == 0) continue;
-                long toPush = Math.min(remaining[j], baseAmounts[j]);
-                long leftover =
-                        pushToSlotsDirect(targetInv, uniqueKeys[j], uniqueKeys[j].getItemStack(), toPush, inputSlots);
-                remaining[j] -= (toPush - leftover);
+                Long available = storageSnapshot.getKey(uniqueKeys[j]);
+                if (available == null || available <= 0) continue;
+                long actualAmount = Math.min(totalDemand[j], available);
+                if (actualAmount <= 0) continue;
+                reqIndices[reqCount] = j;
+                batchReqs[reqCount] = new ItemRequest(uniqueKeys[j], actualAmount);
+                reqCount++;
             }
-        }
+            if (reqCount == 0) return;
 
-        for (int j = 0; j < uniqueCount; j++) {
-            if (remaining[j] > 0) {
-                networkStorage.pushItem(new ItemInfo(uniqueKeys[j], remaining[j]));
+            ItemRequest[] finalReqs =
+                    reqCount == batchReqs.length ? batchReqs : java.util.Arrays.copyOf(batchReqs, reqCount);
+            ItemStorage taken = networkStorage.takeItem(finalReqs);
+            ItemHashMap<Long> takenMap = taken.getStorageUnsafe();
+
+            long[] remaining = new long[uniqueCount];
+            for (int r = 0; r < reqCount; r++) {
+                int idx = reqIndices[r];
+                Long takenAmount = takenMap.getKey(uniqueKeys[idx]);
+                if (takenAmount != null && takenAmount > 0) remaining[idx] = takenAmount;
             }
+
+            for (int t = 0; t < validCount; t++) {
+                BlockMenu targetInv = validMenus[t];
+                for (int j = 0; j < uniqueCount; j++) {
+                    if (remaining[j] <= 0) continue;
+                    int[] inputSlots = validSlotArrays[t][j];
+                    if (inputSlots == null || inputSlots.length == 0) continue;
+                    long toPush = Math.min(remaining[j], baseAmounts[j]);
+                    long leftover = pushToSlotsDirect(
+                            targetInv, uniqueKeys[j], uniqueKeys[j].getItemStack(), toPush, inputSlots);
+                    remaining[j] -= (toPush - leftover);
+                }
+            }
+
+            for (int j = 0; j < uniqueCount; j++) {
+                if (remaining[j] > 0) {
+                    networkStorage.pushItem(new ItemInfo(uniqueKeys[j], remaining[j]));
+                }
+            }
+        } finally {
+            lock.unlock();
         }
     }
+
+    /**
+     * 返回此次 bus 操作应当持有的网络级互斥锁。
+     * <p>同一网络的 take/push 必须在同一把锁下进行，避免并发驱动时超额取出导致刷物。</p>
+     */
+    @Nonnull
+    private static ReentrantLock lockFor(@Nonnull BusTickContext context) {
+        NetworkInfo info = context.getNetworkInfo();
+        // 调用方应保证 isValid(); 此处再兜一层防 NPE
+        return info != null ? info.getStorageLock() : FALLBACK_LOCK;
+    }
+
+    private static final ReentrantLock FALLBACK_LOCK = new ReentrantLock();
 
     @Nullable private static List<Pair<ItemKey, Integer>> ensureSettingsCache(
             @Nonnull Block busBlock, @Nonnull ISettingSlotHolder settingHolder) {
