@@ -10,8 +10,10 @@ import io.github.thebusybiscuit.slimefun4.implementation.Slimefun;
 import io.github.thebusybiscuit.slimefun4.utils.ChestMenuUtils;
 import io.github.thebusybiscuit.slimefun4.utils.SlimefunUtils;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.Nonnull;
 import me.ddggdd135.guguslimefunlib.libraries.colors.CMIChatColor;
 import me.ddggdd135.slimeae.SlimeAEPlugin;
@@ -28,12 +30,31 @@ import me.mrCookieSlime.Slimefun.api.inventory.BlockMenu;
 import org.bukkit.Location;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
-import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
 public class MEPatternManagementTerminal extends METerminal {
 
     private static final int PATTERN_INPUT_SLOT = 8;
+
+    /**
+     * 每个样板管理终端方块一份的渲染缓存. 关键点:
+     * <ul>
+     *   <li>{@link #patterns} 是 {@link #collectPatterns(NetworkInfo)} 的结果, 命中期内不再扫描所有合成槽容器.</li>
+     *   <li>{@link #expireAt} 给 collectPatterns 加了一个 250ms 的 TTL (≈ 5 ticks),
+     *       所以玩家加/取一张样板后最迟 5 tick 内 GUI 会自动刷新, 而不是每 tick 全扫.</li>
+     *   <li>{@link #lastDrawnSignature} 用来对"过滤后的当前页内容"做去重 -- 没变化就不再调用 48 次
+     *       {@code replaceExistingItem} 写 BlockMenu.</li>
+     * </ul>
+     */
+    private static final class PatternListCache {
+        volatile List<PatternEntry> patterns = Collections.emptyList();
+        volatile long expireAt = 0L;
+        volatile long signature = 0L;
+        volatile long lastDrawnSignature = Long.MIN_VALUE;
+    }
+
+    private static final ConcurrentHashMap<Location, PatternListCache> PATTERN_CACHE = new ConcurrentHashMap<>();
+    private static final long PATTERN_LIST_TTL_MS = 250L;
 
     public MEPatternManagementTerminal(
             ItemGroup itemGroup, SlimefunItemStack item, RecipeType recipeType, ItemStack[] recipe) {
@@ -71,29 +92,39 @@ public class MEPatternManagementTerminal extends METerminal {
         if (blockMenu == null) return;
         if (!blockMenu.hasViewer()) return;
 
+        PatternListCache cache = PATTERN_CACHE.computeIfAbsent(block.getLocation(), loc -> new PatternListCache());
+
         NetworkInfo info = SlimeAEPlugin.getNetworkData().getNetworkInfo(block.getLocation());
         if (info == null) {
+            long sig = -1L;
+            if (cache.lastDrawnSignature == sig) return;
             for (int slot : getDisplaySlots()) {
                 blockMenu.replaceExistingItem(slot, MenuItems.EMPTY);
                 blockMenu.addMenuClickHandler(slot, ChestMenuUtils.getEmptyClickHandler());
             }
+            cache.lastDrawnSignature = sig;
             return;
         }
 
         List<?> viewers = blockMenu.getInventory().getViewers();
         if (viewers.isEmpty()) return;
-        Player player = (Player) viewers.get(0);
 
         String filter = getFilter(block).toLowerCase(Locale.ROOT);
         updateFilterButton(blockMenu, filter);
 
-        List<PatternEntry> allPatterns = collectPatterns(info);
+        // 取(或重建)样板列表 -- TTL 命中期内复用上次的扫描结果, 避免每 tick 全扫所有合成槽容器.
+        List<PatternEntry> allPatterns = getOrRefreshPatterns(info, cache);
 
         if (!filter.isEmpty()) {
-            allPatterns.removeIf(entry -> {
+            // copy-on-filter, 不污染缓存里的 patterns
+            List<PatternEntry> filtered = new ArrayList<>(allPatterns.size());
+            for (PatternEntry entry : allPatterns) {
                 String name = CMIChatColor.stripColor(ItemUtils.getItemName(entry.outputDisplay));
-                return name == null || !name.toLowerCase(Locale.ROOT).contains(filter);
-            });
+                if (name != null && name.toLowerCase(Locale.ROOT).contains(filter)) {
+                    filtered.add(entry);
+                }
+            }
+            allPatterns = filtered;
         }
 
         int page = getPage(block);
@@ -102,6 +133,14 @@ public class MEPatternManagementTerminal extends METerminal {
             page = maxPage;
             setPage(block, page);
         }
+
+        // 渲染签名: 列表内容版本 + filter + page. 任一变化才重绘 48 槽.
+        long renderSig =
+                (((long) cache.signature) * 1315423911L) ^ (long) filter.hashCode() * 2654435761L ^ ((long) page << 32);
+        if (cache.lastDrawnSignature == renderSig) {
+            return;
+        }
+        cache.lastDrawnSignature = renderSig;
 
         int startIndex = page * getDisplaySlots().length;
         int endIndex = startIndex + getDisplaySlots().length;
@@ -116,7 +155,34 @@ public class MEPatternManagementTerminal extends METerminal {
             }
             PatternEntry entry = allPatterns.get(idx);
             blockMenu.replaceExistingItem(slot, createPatternDisplayItem(entry));
-            blockMenu.addMenuClickHandler(slot, handlePatternClick(entry, info));
+            blockMenu.addMenuClickHandler(slot, handlePatternClick(entry, info, block.getLocation()));
+        }
+    }
+
+    /**
+     * 在 TTL 命中期内返回缓存的样板列表, 否则重新扫描所有 CraftingHolder.
+     * 玩家添加/移除样板的代码会调 {@link #invalidatePatternCache(Location)},
+     * 所以 TTL 主要是个安全网, 防止任何遗漏的失效路径让 UI 卡在旧状态.
+     */
+    private List<PatternEntry> getOrRefreshPatterns(NetworkInfo info, PatternListCache cache) {
+        long now = System.currentTimeMillis();
+        if (now < cache.expireAt && cache.patterns != null) {
+            return cache.patterns;
+        }
+        List<PatternEntry> fresh = collectPatterns(info);
+        cache.patterns = fresh;
+        cache.signature++;
+        cache.expireAt = now + PATTERN_LIST_TTL_MS;
+        return fresh;
+    }
+
+    /**
+     * 在样板被取出或新放入后调用一次, 立即让缓存失效.
+     */
+    private static void invalidatePatternCache(Location terminalLoc) {
+        PatternListCache cache = PATTERN_CACHE.get(terminalLoc);
+        if (cache != null) {
+            cache.expireAt = 0L;
         }
     }
 
@@ -192,7 +258,7 @@ public class MEPatternManagementTerminal extends METerminal {
         return loc.getBlockX() + ", " + loc.getBlockY() + ", " + loc.getBlockZ();
     }
 
-    private ChestMenu.MenuClickHandler handlePatternClick(PatternEntry entry, NetworkInfo info) {
+    private ChestMenu.MenuClickHandler handlePatternClick(PatternEntry entry, NetworkInfo info, Location terminalLoc) {
         return (player, slot, itemStack, action) -> {
             SlimefunBlockData blockData =
                     Slimefun.getDatabaseManager().getBlockDataController().getBlockData(entry.holderLocation);
@@ -203,6 +269,7 @@ public class MEPatternManagementTerminal extends METerminal {
             ItemStack patternItem = holderMenu.getItemInSlot(entry.slotInHolder);
             if (patternItem == null || patternItem.getType().isAir()) {
                 player.sendMessage(CMIChatColor.translate("&c该样板已被移除"));
+                invalidatePatternCache(terminalLoc);
                 return false;
             }
 
@@ -213,6 +280,7 @@ public class MEPatternManagementTerminal extends METerminal {
 
             holderMenu.replaceExistingItem(entry.slotInHolder, MenuItems.PATTERN);
             info.setNeedsRecipeUpdate(true);
+            invalidatePatternCache(terminalLoc);
             player.sendMessage(CMIChatColor.translate("&a成功取出样板"));
             return false;
         };
@@ -232,6 +300,7 @@ public class MEPatternManagementTerminal extends METerminal {
         NetworkInfo info = SlimeAEPlugin.getNetworkData().getNetworkInfo(block.getLocation());
         if (info == null) return;
 
+        boolean placedAny = false;
         for (Location holderLoc : info.getCraftingHolders()) {
             if (inputItem.getAmount() <= 0) break;
             SlimefunBlockData blockData =
@@ -243,7 +312,11 @@ public class MEPatternManagementTerminal extends METerminal {
             if (holderMenu == null) continue;
             if (tryPlacePattern(holderMenu, mpi.getPatternSlots(), inputItem)) {
                 info.setNeedsRecipeUpdate(true);
-                if (inputItem.getAmount() <= 0) return;
+                placedAny = true;
+                if (inputItem.getAmount() <= 0) {
+                    invalidatePatternCache(block.getLocation());
+                    return;
+                }
             }
         }
 
@@ -259,8 +332,16 @@ public class MEPatternManagementTerminal extends METerminal {
             if (holderMenu == null) continue;
             if (tryPlacePattern(holderMenu, mi.getPatternSlots(), inputItem)) {
                 info.setNeedsRecipeUpdate(true);
-                if (inputItem.getAmount() <= 0) return;
+                placedAny = true;
+                if (inputItem.getAmount() <= 0) {
+                    invalidatePatternCache(block.getLocation());
+                    return;
+                }
             }
+        }
+
+        if (placedAny) {
+            invalidatePatternCache(block.getLocation());
         }
     }
 
