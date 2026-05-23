@@ -94,32 +94,10 @@ public final class ExportOperation {
         int tickMultiplier = context.getTickMultiplier();
 
         int slotCount = settingHolder.getSettingSlots().length;
-        int uniqueCount = 0;
         ItemKey[] uniqueKeys = new ItemKey[slotCount];
         long[] mergedAmounts = new long[slotCount];
 
-        for (int i = 0; i < slotCount; i++) {
-            Pair<ItemKey, Integer> setting = settings.get(i);
-            if (setting == null) continue;
-            ItemKey settingKey = setting.getFirstValue();
-            ItemStack itemStack = settingKey.getItemStack();
-            if (itemStack == null || itemStack.getType().isAir()) continue;
-
-            int found = -1;
-            for (int j = 0; j < uniqueCount; j++) {
-                if (uniqueKeys[j].equals(settingKey)) {
-                    found = j;
-                    break;
-                }
-            }
-            if (found >= 0) {
-                mergedAmounts[found] += (long) setting.getSecondValue() * tickMultiplier;
-            } else {
-                uniqueKeys[uniqueCount] = settingKey;
-                mergedAmounts[uniqueCount] = (long) setting.getSecondValue() * tickMultiplier;
-                uniqueCount++;
-            }
-        }
+        int uniqueCount = mergeSettings(settings, slotCount, tickMultiplier, uniqueKeys, mergedAmounts);
         if (uniqueCount == 0) return;
 
         // 预解析每个 unique key 在目标 inv 的可写入槽（与网络存储无关，可在锁外完成）
@@ -196,32 +174,10 @@ public final class ExportOperation {
         int tickMultiplier = context.getTickMultiplier();
 
         int slotCount = settingHolder.getSettingSlots().length;
-        int uniqueCount = 0;
         ItemKey[] uniqueKeys = new ItemKey[slotCount];
         long[] mergedAmounts = new long[slotCount];
 
-        for (int i = 0; i < slotCount; i++) {
-            Pair<ItemKey, Integer> setting = settings.get(i);
-            if (setting == null) continue;
-            ItemKey settingKey = setting.getFirstValue();
-            ItemStack itemStack = settingKey.getItemStack();
-            if (itemStack == null || itemStack.getType().isAir()) continue;
-
-            int found = -1;
-            for (int j = 0; j < uniqueCount; j++) {
-                if (uniqueKeys[j].equals(settingKey)) {
-                    found = j;
-                    break;
-                }
-            }
-            if (found >= 0) {
-                mergedAmounts[found] += (long) setting.getSecondValue() * tickMultiplier;
-            } else {
-                uniqueKeys[uniqueCount] = settingKey;
-                mergedAmounts[uniqueCount] = (long) setting.getSecondValue() * tickMultiplier;
-                uniqueCount++;
-            }
-        }
+        int uniqueCount = mergeSettings(settings, slotCount, tickMultiplier, uniqueKeys, mergedAmounts);
         if (uniqueCount == 0) return;
 
         ReentrantLock lock = lockFor(context);
@@ -318,32 +274,10 @@ public final class ExportOperation {
         int tickMultiplier = context.getTickMultiplier();
 
         int slotCount = settingHolder.getSettingSlots().length;
-        int uniqueCount = 0;
         ItemKey[] uniqueKeys = new ItemKey[slotCount];
         long[] baseAmounts = new long[slotCount];
 
-        for (int i = 0; i < slotCount; i++) {
-            Pair<ItemKey, Integer> setting = settings.get(i);
-            if (setting == null) continue;
-            ItemKey settingKey = setting.getFirstValue();
-            ItemStack itemStack = settingKey.getItemStack();
-            if (itemStack == null || itemStack.getType().isAir()) continue;
-
-            int found = -1;
-            for (int j = 0; j < uniqueCount; j++) {
-                if (uniqueKeys[j].equals(settingKey)) {
-                    found = j;
-                    break;
-                }
-            }
-            if (found >= 0) {
-                baseAmounts[found] += (long) setting.getSecondValue() * tickMultiplier;
-            } else {
-                uniqueKeys[uniqueCount] = settingKey;
-                baseAmounts[uniqueCount] = (long) setting.getSecondValue() * tickMultiplier;
-                uniqueCount++;
-            }
-        }
+        int uniqueCount = mergeSettings(settings, slotCount, tickMultiplier, uniqueKeys, baseAmounts);
         if (uniqueCount == 0) return;
 
         BlockFace dir = context.getDirection();
@@ -360,6 +294,7 @@ public final class ExportOperation {
         int validCount = 0;
         BlockMenu[] validMenus = new BlockMenu[chainDist];
         int[][][] validSlotArrays = new int[chainDist][uniqueCount][];
+        int[] keyValidCounts = new int[uniqueCount];
 
         for (int i = 0; i < chainDist; i++) {
             Block target = world.getBlockAt(bx + dx * i, by + dy * i, bz + dz * i);
@@ -377,7 +312,10 @@ public final class ExportOperation {
                 } catch (IllegalArgumentException e) {
                     slotsForTarget[j] = null;
                 }
-                if (slotsForTarget[j] != null && slotsForTarget[j].length > 0) hasAnySlot = true;
+                if (slotsForTarget[j] != null && slotsForTarget[j].length > 0) {
+                    hasAnySlot = true;
+                    keyValidCounts[j]++;
+                }
             }
             if (!hasAnySlot) continue;
 
@@ -389,7 +327,7 @@ public final class ExportOperation {
 
         long[] totalDemand = new long[uniqueCount];
         for (int j = 0; j < uniqueCount; j++) {
-            totalDemand[j] = baseAmounts[j] * validCount;
+            totalDemand[j] = baseAmounts[j] * keyValidCounts[j];
         }
 
         ReentrantLock lock = lockFor(context);
@@ -459,6 +397,42 @@ public final class ExportOperation {
     }
 
     private static final ReentrantLock FALLBACK_LOCK = new ReentrantLock();
+
+    /**
+     * 将设置槽位列表合并为去重后的 (ItemKey, 总量) 数组。
+     * 返回去重后的条目数；结果写入 uniqueKeys 和 amounts。
+     */
+    private static int mergeSettings(
+            @Nonnull List<Pair<ItemKey, Integer>> settings,
+            int slotCount,
+            int tickMultiplier,
+            @Nonnull ItemKey[] uniqueKeys,
+            @Nonnull long[] amounts) {
+        int uniqueCount = 0;
+        for (int i = 0; i < slotCount; i++) {
+            Pair<ItemKey, Integer> setting = settings.get(i);
+            if (setting == null) continue;
+            ItemKey settingKey = setting.getFirstValue();
+            ItemStack itemStack = settingKey.getItemStack();
+            if (itemStack == null || itemStack.getType().isAir()) continue;
+
+            int found = -1;
+            for (int j = 0; j < uniqueCount; j++) {
+                if (uniqueKeys[j].equals(settingKey)) {
+                    found = j;
+                    break;
+                }
+            }
+            if (found >= 0) {
+                amounts[found] += (long) setting.getSecondValue() * tickMultiplier;
+            } else {
+                uniqueKeys[uniqueCount] = settingKey;
+                amounts[uniqueCount] = (long) setting.getSecondValue() * tickMultiplier;
+                uniqueCount++;
+            }
+        }
+        return uniqueCount;
+    }
 
     @Nullable private static List<Pair<ItemKey, Integer>> ensureSettingsCache(
             @Nonnull Block busBlock, @Nonnull ISettingSlotHolder settingHolder) {

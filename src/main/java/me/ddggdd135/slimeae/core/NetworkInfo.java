@@ -285,28 +285,34 @@ public class NetworkInfo implements IDisposable {
 
     @Nonnull
     public Set<CraftingRecipe> getRecipes() {
-        // F9: 使用缓存的配方集合
         Set<CraftingRecipe> cached = cachedRecipes;
         if (cached != null) return cached;
 
-        Set<CraftingRecipe> recipes = new HashSet<>();
-        for (Location location : craftingHolders) {
-            // fix NullPointException in here
-            Set<CraftingRecipe> recipes1 = recipeMap.get(location);
-            if (null != recipes1) {
-                recipes.addAll(recipes1);
+        // 双重检查: 避免多线程重复构建同一个集合
+        synchronized (this) {
+            cached = cachedRecipes;
+            if (cached != null) return cached;
+
+            Set<CraftingRecipe> recipes = new HashSet<>();
+            for (Location location : craftingHolders) {
+                Set<CraftingRecipe> recipes1 = recipeMap.get(location);
+                if (null != recipes1) {
+                    recipes.addAll(recipes1);
+                }
             }
+            Set<CraftingRecipe> result = Collections.unmodifiableSet(recipes);
+            cachedRecipes = result;
+            return result;
         }
-        Set<CraftingRecipe> result = Collections.unmodifiableSet(recipes);
-        cachedRecipes = result;
-        return result;
     }
 
     /**
      * 使配方缓存失效，当 recipeMap 或 craftingHolders 发生变化时调用
      */
     public void invalidateRecipeCache() {
-        cachedRecipes = null;
+        synchronized (this) {
+            cachedRecipes = null;
+        }
     }
 
     /**
@@ -315,7 +321,9 @@ public class NetworkInfo implements IDisposable {
      * 确保 getRecipes() 在 clear()+putAll() 之间不会返回空集合。
      */
     public void setRecipeCache(@Nonnull Set<CraftingRecipe> cache) {
-        cachedRecipes = cache;
+        synchronized (this) {
+            cachedRecipes = cache;
+        }
     }
 
     @Nullable public CraftingRecipe getRecipeFor(@Nonnull ItemStack output) {
