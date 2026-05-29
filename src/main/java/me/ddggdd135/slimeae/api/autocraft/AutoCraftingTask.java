@@ -680,6 +680,7 @@ public class AutoCraftingTask implements IDisposable {
                     }
                     storage.addItem(resultItems);
                     step.setVirtualRunning(0);
+                    step.setVirtualProcess(0);
                 }
             }
         }
@@ -798,32 +799,35 @@ public class AutoCraftingTask implements IDisposable {
             }
         }
 
-        int totalSpeed = info.getVirtualCraftingDeviceSpeeds().getOrDefault(craftType, 0);
-        int used = info.getVirtualCraftingDeviceUsed().getOrDefault(craftType, 0);
-        int available = totalSpeed - used;
-        if (available > 0) {
-            long neededSpeed = Math.min(step.getVirtualRunning() * 4L, maxDevices * 4L);
-            int speed = totalSpeed;
-            if (speed > maxDevices * 4) speed = maxDevices * 4;
-            if (speed > neededSpeed) speed = (int) neededSpeed;
-            if (speed > available) speed = available;
-
-            step.addVirtualProcess(speed);
-            info.getVirtualCraftingDeviceUsed().put(craftType, used + speed);
-        }
-
-        int result = Math.min(step.getVirtualProcess() / 4, step.getVirtualRunning());
-        step.setVirtualProcess(step.getVirtualProcess() - result * 4);
-
-        step.setVirtualRunning(step.getVirtualRunning() - result);
-        ItemHashMap<Long> outputAmounts = nextRecipe.getOutputAmounts();
         ItemHashMap<Long> inputAmounts = nextRecipe.getInputAmounts();
-        ItemHashMap<Long> resultItems = new ItemHashMap<>();
-        for (Map.Entry<ItemKey, Long> entry : outputAmounts.keyEntrySet()) {
-            resultItems.putKey(entry.getKey(), entry.getValue() * result);
+
+        if (!isCancelling) {
+            int totalSpeed = info.getVirtualCraftingDeviceSpeeds().getOrDefault(craftType, 0);
+            int used = info.getVirtualCraftingDeviceUsed().getOrDefault(craftType, 0);
+            int available = totalSpeed - used;
+            if (available > 0) {
+                long neededSpeed = Math.min(step.getVirtualRunning() * 4L, maxDevices * 4L);
+                int speed = totalSpeed;
+                if (speed > maxDevices * 4) speed = maxDevices * 4;
+                if (speed > neededSpeed) speed = (int) neededSpeed;
+                if (speed > available) speed = available;
+
+                step.addVirtualProcess(speed);
+                info.getVirtualCraftingDeviceUsed().put(craftType, used + speed);
+            }
+
+            int result = Math.min(step.getVirtualProcess() / 4, step.getVirtualRunning());
+            step.setVirtualProcess(step.getVirtualProcess() - result * 4);
+
+            step.setVirtualRunning(step.getVirtualRunning() - result);
+            ItemHashMap<Long> outputAmounts = nextRecipe.getOutputAmounts();
+            ItemHashMap<Long> resultItems = new ItemHashMap<>();
+            for (Map.Entry<ItemKey, Long> entry : outputAmounts.keyEntrySet()) {
+                resultItems.putKey(entry.getKey(), entry.getValue() * result);
+            }
+            storage.addItem(resultItems);
+            if (result > 0) hasProgress = true;
         }
-        storage.addItem(resultItems);
-        if (result > 0) hasProgress = true;
 
         long actualAmount = Math.min(maxDevices - step.getVirtualRunning(), step.getAmount());
         if (actualAmount > 0) {
